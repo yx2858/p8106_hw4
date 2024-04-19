@@ -1,0 +1,255 @@
+---
+title: "p8106_hw4"
+author: "Yueyi Xu"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(ISLR) 
+library(mlbench) 
+library(caret) 
+library(tidymodels) 
+library(rpart) 
+library(rpart.plot)
+library(ranger)
+library(randomForest)
+library(tidyverse)
+library(lightgbm)
+library(pROC)
+```
+
+# Problem 1
+
+```{r}
+# Import data, clean the data, drop na values
+college_data <- read.csv("College.csv")
+
+college_data <- college_data %>% 
+  select(-College)
+
+# Data Partition
+set.seed(1)
+
+# Split the dataset into training (80%) and test (20%) sets
+data_split <- initial_split(college_data, prop = 0.8)
+
+# Extract the training and test data
+training_data <- training(data_split)
+testing_data <- testing(data_split)
+```
+
+### (a)
+Build a regression tree on the training data to predict the response. Create a plot of the tree.
+```{r}
+set.seed(1)
+tree1 <- rpart(formula = Outstate ~.,
+               data = training_data,
+               control = rpart.control(cp = 0))
+rpart.plot(tree1)
+```
+
+```{r}
+set.seed(1)
+tree2 <- rpart(Outstate ~.,
+               data = training_data,
+               control = rpart.control(cp = 0.1))
+rpart.plot(tree2)
+```
+
+```{r}
+printcp(tree1)
+cpTable <- tree1$cptable
+plotcp(tree1)
+```
+
+
+### (b)
+Perform random forest on the training data. Report the variable importance and the test error.
+```{r}
+# Perform random forest
+ctrl <- trainControl(method = "cv") 
+
+rf.grid <- expand.grid(mtry = 1:16,
+                       splitrule = "variance",
+                       min.node.size = 1:6)
+set.seed(1)
+rf.fit <- train(Outstate ~ . , 
+                data = training_data, 
+                method = "ranger",
+                tuneGrid = rf.grid,
+                trControl = ctrl,
+                importance = "permutation")
+
+ggplot(rf.fit, highlight = TRUE) +
+  theme_minimal() +
+  labs(captain = "Random Forest")
+
+rf.fit$bestTune %>%
+  knitr::kable(caption = "Best tune")
+
+rf2.final.per <- ranger(Outstate ~ . ,
+                        training_data,
+                        mtry = rf.fit$bestTune[[1]], 
+                        min.node.size = rf.fit$bestTune[[3]], 
+                        splitrule = "variance",
+                        importance = "permutation", 
+                        scale.permutation.importance = TRUE)
+
+barplot(sort(ranger::importance(rf2.final.per),
+             decreasing = FALSE),
+        las = 2,
+        horiz = TRUE,
+        cex.names = 0.7,
+        col = colorRampPalette(colors = c("cyan", "blue"))(19))
+
+# Variable Importance
+df <- as.data.frame(ranger::importance(rf2.final.per))
+colnames(df) <- "Importance"
+df %>% arrange(desc(Importance))
+
+# Test Error
+pred.rf <- predict(rf.fit, newdata = testing_data)
+RMSE.rf <- RMSE(pred.rf, testing_data$Outstate)
+```
+
+The variable "expend" is the most significant variable with 40.178942 value for predicting out-of-state tuition. The test error of RMSE for the random forest model is 1741.258.
+
+### (c)
+Perform boosting on the training data. Report the variable importance and the test error.
+```{r}
+# Boosting
+gbm.grid <- expand.grid(n.trees = c(5000,10000,20000,30000,40000,50000),
+                        interaction.depth = 1:3,
+                        shrinkage = c(0.001,0.005),
+                        n.minobsinnode = c(1))
+set.seed(1)
+gbm.fit <- train(Outstate ~ . , 
+                 data = training_data, 
+                 method = "gbm",
+                 tuneGrid = gbm.grid,
+                 trControl = ctrl,
+                 verbose = FALSE)
+
+ggplot(gbm.fit, highlight = TRUE) +
+  theme_minimal() +
+  labs(caption = "Boosting")
+
+gbm.fit$bestTune %>%
+  knitr::kable(caption = "Best tune for boostin")
+
+# Variable Importance
+summary(gbm.fit$finalModel, plot = FALSE)
+
+# Test Error
+gbm.pred <- predict(gbm.fit, newdata = testing_data)
+RMSE.boosting <- RMSE(gbm.pred, testing_data$Outstate)
+```
+
+The variable "expend" is the most significant variable with 53.244888 value for predicting out-of-state tuition. The test error of RMSE for the boosting model is 1649.905.
+
+# Problem 2
+```{r}
+auto_data <- read.csv("auto.csv")
+
+auto_data <- auto_data %>% 
+  mutate(mpg_cat = as.factor(mpg_cat))
+
+set.seed(1)
+data_split_auto <- initial_split(auto_data, prop = 0.7)
+# Extract the training and testing data
+training_data_auto <- training(data_split_auto) 
+testing_data_auto <- testing(data_split_auto)
+```
+
+### (a)
+Build a classification tree using the training data, with mpg cat as the response. Which tree size corresponds to the lowest cross-validation error? Is this the same as the tree size obtained using the 1 SE rule?
+```{r}
+# Classification tree
+ctrl_2 <- trainControl(method = "cv",
+                       summaryFunction = twoClassSummary,
+                       classProbs = TRUE)
+
+set.seed(1)
+rpart.fit <- train(mpg_cat ~ . ,
+                   training_data_auto,
+                   method = "rpart",
+                   tuneGrid = data.frame(cp = exp(seq(-8,-3, len = 100))),
+                   trControl = ctrl_2,
+                   metric = "ROC")
+
+best.ct <- prune(rpart.fit$finalModel, cp = rpart.fit$bestTune$cp)
+rpart.plot(best.ct)
+
+size1 <- nrow(best.ct$frame)
+rpart.fit$bestTune %>%
+  knitr::kable(caption = "Best tune for classification tree")
+```
+
+```{r}
+# 1SE
+ctrl_1se <- trainControl(method = "cv",
+                         summaryFunction = twoClassSummary,
+                         selectionFunction = "oneSE",
+                         classProbs = TRUE)
+set.seed(1)
+
+rpart.fit_1se <- train(mpg_cat ~ . ,
+                       training_data_auto,
+                       method = "rpart",
+                       tuneGrid = data.frame(cp = exp(seq(-8,-3, len = 100))),
+                       trControl = ctrl_1se,
+                       metric = "ROC")
+
+oneSE.ct <- prune(rpart.fit_1se$finalModel, cp = rpart.fit_1se$bestTune$cp)
+rpart.plot(oneSE.ct)
+
+size2 <- nrow(oneSE.ct$frame)
+rpart.fit_1se$bestTune %>%
+  knitr::kable(caption = "Best tune for 1SE classification tree")
+```
+
+
+```{r}
+# Displaying best cp values
+cat("Best cp without 1SE rule:", rpart.fit$bestTune$cp, "\n")
+cat("Best cp with 1SE rule:", rpart.fit_1se$bestTune$cp, "\n")
+
+# Compare trees
+rpart.plot(rpart.fit$finalModel, main = "Best Model without 1SE rule")
+rpart.plot(rpart.fit_1se$finalModel, main = "Best Model with 1SE rule")
+```
+
+Both without the 1SE rule and with the 1SE rule, the tree size is 13. However, the best model without the 1SE rule has the complexity parameter of 0.003984862 while the model with 1SE has the complexity parameter of 0.008081467.
+
+### (b)
+Perform boosting on the training data and report the variable importance. Report the test data performance.
+```{r}
+# Boosting
+ctrl_3 <- trainControl(method = "cv",
+                       summaryFunction = twoClassSummary,
+                       classProbs = TRUE,
+                       selectionFunction = "best")
+
+gbm.grid.auto <- expand.grid(n.trees = c(5000,10000,20000,30000,40000,50000),
+                             interaction.depth = 1:3,
+                             shrinkage = c(0.001,0.005),
+                             n.minobsinnode = c(1))
+set.seed(1)
+gbm.fit.auto <- train(mpg_cat ~ . , 
+                      data = training_data_auto, 
+                      method = "gbm",
+                      tuneGrid = gbm.grid,
+                      trControl = ctrl_3,
+                      verbose = FALSE)
+
+# Variable Importance
+summary(gbm.fit.auto$finalModel, plot = FALSE)
+
+# Test Error
+gbm.pred.auto <- predict(gbm.fit.auto, newdata = testing_data_auto, type = 'prob')[,1]
+pROC::roc(testing_data_auto$mpg_cat, gbm.pred.auto)
+```
+
+The variable "displacement" is the most significant variable with 39.21302364 value for predicting out-of-state tuition. The AUC value is 0.9781.
+
